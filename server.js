@@ -1770,6 +1770,126 @@ app.post("/vendors", async (req, res) => {
     })
   }
 })
+// Create a bill (reduce stock quantity)
+app.post("/billing", async (req, res) => {
+  const { customer_name, customer_phone, items, created_by, user_role, user_department } = req.body;
+
+  const connection = await pool.getConnection();
+  await connection.beginTransaction();
+
+  try {
+    // Insert bill header
+    const [billResult] = await connection.execute(
+      `INSERT INTO bills (bill_number, customer_name, customer_phone, total_amount, created_by)
+       VALUES (?, ?, ?, 0, ?)`,
+      [`BILL-${Date.now()}`, customer_name, customer_phone, created_by]
+    );
+
+    const billId = billResult.insertId;
+    let totalAmount = 0;
+
+    // Process each item
+    for (const item of items) {
+  const [stockRows] = await connection.execute(
+    "SELECT id, item_name, department, quantity FROM stock WHERE id = ? FOR UPDATE",
+    [item.stock_id]
+  );
+
+  if (stockRows.length === 0) throw new Error(`Item not found: ${item.stock_id}`);
+  const stockItem = stockRows[0];
+
+  // ✅ Restriction
+if (
+  user_role === "operator" &&
+  stockItem.department.toLowerCase() !== user_department.toLowerCase()
+) {
+  throw new Error(`You cannot bill items outside your department: ${stockItem.item_name}`);
+}
+
+
+   if (stockItem.quantity < item.quantity) {
+  throw new Error(`Not enough stock for ${stockItem.item_name}`);
+}
+
+     const unitPrice = item.price || 100;
+
+      // Deduct stock
+     await connection.execute(
+  "UPDATE stock SET quantity = quantity - ? WHERE id = ?",
+  [item.quantity, item.stock_id]
+);
+
+
+      const lineTotal = unitPrice * item.quantity;
+      totalAmount += lineTotal;
+
+      // Insert bill item
+     await connection.execute(
+  `INSERT INTO bill_items (bill_id, stock_id, quantity,price, total)
+   VALUES (?, ?, ?, ?, ?)`,
+  [billId, item.stock_id, item.quantity, unitPrice, lineTotal]
+);
+
+
+      // Log transaction
+      await logStockTransaction(
+        item.stock_id,
+        "OUT",
+        item.quantity,
+        lineTotal,
+        created_by,
+        `Billed in #${billId}`
+      );
+    }
+
+    // Update bill total
+    await connection.execute("UPDATE bills SET total_amount = ? WHERE id = ?", [totalAmount, billId]);
+
+    await connection.commit();
+    res.json({ success: true, bill_id: billId, total: totalAmount });
+  } catch (err) {
+    await connection.rollback();
+    res.status(400).json({ success: false, message: err.message });
+  } finally {
+    connection.release();
+  }
+});
+// Get stock items (filtered by operator department if operator)
+app.get("/stock", async (req, res) => {
+  const { operatorId } = req.query;
+
+  try {
+    // 1️⃣ Fetch operator role + department
+    const [opRows] = await pool.execute(
+      "SELECT role, department FROM operators WHERE id = ?",
+      [operatorId]
+    );
+
+    if (opRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Operator not found" });
+    }
+
+    const { role, department } = opRows[0];
+
+    // 2️⃣ Return filtered stock
+    let query = "SELECT * FROM stock";
+    let values = [];
+
+    if (role === "operator") {
+      query += " WHERE department = ?";
+      values.push(department);
+    }
+
+    const [rows] = await pool.execute(query, values);
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error("Error fetching stock:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
+
 
 // Start server
 app.listen(PORT, () => {
