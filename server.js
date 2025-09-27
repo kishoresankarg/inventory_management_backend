@@ -31,6 +31,34 @@ const LOW_STOCK_CHECK_INTERVAL = 3600000; // 1 hour in milliseconds
 app.use(cors());
 app.use(express.json());
 
+// Health check endpoint
+app.get("/", (req, res) => {
+  res.json({ 
+    status: "Server is running",
+    timestamp: new Date().toISOString(),
+    port: PORT 
+  });
+});
+
+app.get("/health", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    connection.release();
+    res.json({ 
+      status: "healthy",
+      database: "connected",
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: "unhealthy",
+      database: "disconnected",
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 // MySQL connection
 const dbConfig = {
   host: process.env.DB_HOST,
